@@ -1,0 +1,178 @@
+name: 'Strake Gate Check'
+description: 'Pre-deploy safety check — evaluates service health, incidents, dependencies, and lockfile-diff signals. Posts a GO / HOLD / CRITICAL verdict as a PR comment and optionally blocks the merge.'
+author: 'Strake'
+branding:
+  icon: 'shield'
+  color: 'orange'
+
+inputs:
+  strake-deploy-token:
+    description: 'Strake deploy token (Settings → Deploy Tokens).'
+    required: true
+  service-id:
+    description: 'Strake service UUID (Settings → Services → copy ID).'
+    required: true
+  strake-api-url:
+    description: 'Strake API base URL. Override only for self-hosted deployments.'
+    required: false
+    default: 'https://api.strake.dev'
+  fail-on-hold:
+    description: 'Exit non-zero on HOLD (blocks the merge). CRITICAL always exits non-zero. Default false — HOLD warns via annotation but does not fail.'
+    required: false
+    default: 'false'
+  post-pr-comment:
+    description: 'Post (or update) a PR comment with the verdict. Requires `permissions: pull-requests: write` on the calling job.'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'GitHub token used to post the PR comment. Defaults to the automatic ${{ github.token }}.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  verdict:
+    description: 'One of: go | hold | critical'
+    value: ${{ steps.check.outputs.verdict }}
+  reason:
+    description: 'Human-readable reason from the gate engine.'
+    value: ${{ steps.check.outputs.reason }}
+  service:
+    description: 'Service slug returned by the API.'
+    value: ${{ steps.check.outputs.service }}
+  checked-at:
+    description: 'ISO-8601 timestamp of the evaluation.'
+    value: ${{ steps.check.outputs.checked_at }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Call Strake gate check
+      id: check
+      shell: bash
+      env:
+        STRAKE_API_URL: ${{ inputs.strake-api-url }}
+        STRAKE_TOKEN: ${{ inputs.strake-deploy-token }}
+        STRAKE_SERVICE_ID: ${{ inputs.service-id }}
+      run: |
+        set -euo pipefail
+
+        RESPONSE=$(curl -sS --fail-with-body \
+          --max-time 15 \
+          -H "Authorization: Bearer ${STRAKE_TOKEN}" \
+          "${STRAKE_API_URL}/v1/gate/${STRAKE_SERVICE_ID}/check") \
+          || { echo "::error::Strake gate check request failed"; exit 2; }
+
+        # Parse with jq if available; fall back to grep for minimal runners.
+        if command -v jq >/dev/null 2>&1; then
+          VERDICT=$(echo "$RESPONSE" | jq -r '.verdict')
+          REASON=$(echo "$RESPONSE" | jq -r '.reason')
+          SERVICE=$(echo "$RESPONSE" | jq -r '.service')
+          CHECKED_AT=$(echo "$RESPONSE" | jq -r '.checked_at')
+        else
+          VERDICT=$(echo "$RESPONSE" | sed -n 's/.*"verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          REASON=$(echo "$RESPONSE" | sed -n 's/.*"reason"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          SERVICE=$(echo "$RESPONSE" | sed -n 's/.*"service"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          CHECKED_AT=$(echo "$RESPONSE" | sed -n 's/.*"checked_at"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        fi
+
+        if [ -z "${VERDICT:-}" ]; then
+          echo "::error::Strake gate check response missing verdict"
+          echo "$RESPONSE" | head -c 500
+          exit 2
+        fi
+
+        {
+          echo "verdict=${VERDICT}"
+          echo "reason=${REASON}"
+          echo "service=${SERVICE}"
+          echo "checked_at=${CHECKED_AT}"
+        } >> "$GITHUB_OUTPUT"
+
+        # Annotate + echo so the Action log is immediately readable.
+        case "$VERDICT" in
+          go)
+            echo "::notice title=Strake Gate::GO — $REASON"
+            ;;
+          hold)
+            echo "::warning title=Strake Gate::HOLD — $REASON"
+            ;;
+          critical)
+            echo "::error title=Strake Gate::CRITICAL — $REASON"
+            ;;
+        esac
+
+    - name: Upsert PR comment
+      if: ${{ inputs.post-pr-comment == 'true' && github.event_name == 'pull_request' }}
+      uses: actions/github-script@v7
+      env:
+        VERDICT: ${{ steps.check.outputs.verdict }}
+        REASON: ${{ steps.check.outputs.reason }}
+        SERVICE: ${{ steps.check.outputs.service }}
+        CHECKED_AT: ${{ steps.check.outputs.checked_at }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const verdict = process.env.VERDICT;
+          const reason = process.env.REASON || '';
+          const service = process.env.SERVICE || '';
+          const checkedAt = process.env.CHECKED_AT || '';
+
+          const MARKER = '<!-- strake-gate-check-comment -->';
+          const banner = {
+            go: '🟢 **GO** — safe to deploy',
+            hold: '🟡 **HOLD** — review signals before merge',
+            critical: '🔴 **CRITICAL** — do not deploy',
+          }[verdict] || `**${verdict.toUpperCase()}**`;
+
+          const body = [
+            MARKER,
+            `### Strake Gate Check`,
+            '',
+            banner,
+            '',
+            `- **Service:** \`${service}\``,
+            `- **Reason:** ${reason}`,
+            `- **Checked at:** ${checkedAt}`,
+            '',
+            `<sub>Posted by [strake-dev/gate-check](https://strake.dev/docs) • [view service](https://strake.dev/app/gate)</sub>`,
+          ].join('\n');
+
+          const { owner, repo } = context.repo;
+          const issue_number = context.payload.pull_request.number;
+
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner, repo, issue_number, per_page: 100,
+          });
+          const existing = comments.find((c) => c.body && c.body.includes(MARKER));
+
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner, repo, comment_id: existing.id, body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner, repo, issue_number, body,
+            });
+          }
+
+    - name: Enforce verdict
+      shell: bash
+      env:
+        VERDICT: ${{ steps.check.outputs.verdict }}
+        FAIL_ON_HOLD: ${{ inputs.fail-on-hold }}
+      run: |
+        case "$VERDICT" in
+          go)       exit 0 ;;
+          critical) exit 1 ;;
+          hold)
+            if [ "$FAIL_ON_HOLD" = "true" ]; then
+              echo "::error::Strake gate is HOLD and fail-on-hold is enabled"
+              exit 1
+            fi
+            exit 0
+            ;;
+          *)
+            echo "::error::Unknown verdict from Strake gate: $VERDICT"
+            exit 2
+            ;;
+        esac
