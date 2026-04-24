@@ -1,8 +1,12 @@
 # strake-dev/gate-check
 
+> Part of [Strake](https://strake.dev) — CI-native deploy safety.
+
 Pre-deploy safety check for GitHub Actions. Runs on `pull_request` (or anywhere
 you want a verdict), calls the Strake gate engine, and upserts a verdict
 comment on the PR. Optionally blocks the merge on HOLD or CRITICAL.
+
+**Need an account?** Sign up free at [strake.dev](https://strake.dev).
 
 ## Usage
 
@@ -28,7 +32,9 @@ jobs:
 ```
 
 That's three lines after the boilerplate. Obtain `STRAKE_DEPLOY_TOKEN` from
-**Settings → Deploy Tokens** and the service UUID from **Settings → Services**.
+[**Settings → Deploy Tokens**](https://strake.dev/app/settings/deploy-tokens)
+and the service UUID from
+[**Settings → Services**](https://strake.dev/app/settings/services).
 
 ## Inputs
 
@@ -59,3 +65,14 @@ That's three lines after the boilerplate. Obtain `STRAKE_DEPLOY_TOKEN` from
 | `critical` | 1 | 1 |
 
 Network errors or malformed responses → exit 2.
+
+## Links
+
+- [strake.dev](https://strake.dev) — product homepage
+- [Docs](https://strake.dev/docs) — setup guides and API reference
+- [Dashboard](https://strake.dev/app/gate) — view live gate evaluations
+- [Issues](https://github.com/strake-dev/gate-check/issues) — report bugs or request features
+
+---
+
+© 2026 Strake. MIT licensed.

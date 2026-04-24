@@ -1,5 +1,5 @@
 name: 'Strake Gate Check'
-description: 'Pre-deploy safety check — evaluates service health, incidents, dependencies, and lockfile-diff signals. Posts a GO / HOLD / CRITICAL verdict as a PR comment and optionally blocks the merge.'
+description: 'Pre-deploy safety check. Posts a GO/HOLD/CRITICAL verdict as a PR comment and blocks unsafe merges.'
 author: 'Strake'
 branding:
   icon: 'shield'
