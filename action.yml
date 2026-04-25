@@ -1,5 +1,5 @@
 name: 'Strake Gate Check'
-description: 'Pre-deploy safety check. Posts a GO/HOLD/CRITICAL verdict as a PR comment and blocks unsafe merges. Signal 5: dependency change detection.'
+description: 'Pre-deploy safety check. Posts a GO/HOLD/CRITICAL verdict as a PR comment and blocks unsafe merges.'
 author: 'Strake'
 branding:
   icon: 'shield'
