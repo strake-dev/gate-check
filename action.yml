@@ -1,5 +1,5 @@
 name: 'Strake Gate Check'
-description: 'Pre-deploy safety check. Posts a GO/HOLD/CRITICAL verdict as a PR comment and blocks unsafe merges.'
+description: 'Pre-deploy safety check. Posts a GO/HOLD/CRITICAL verdict as a PR comment and blocks unsafe merges. Signal 5: dependency change detection.'
 author: 'Strake'
 branding:
   icon: 'shield'
@@ -42,6 +42,12 @@ outputs:
   checked-at:
     description: 'ISO-8601 timestamp of the evaluation.'
     value: ${{ steps.check.outputs.checked_at }}
+  dep-changes-level:
+    description: 'Dependency change signal level: ok | warning | critical | unknown. Empty string when GitHub is not connected.'
+    value: ${{ steps.check.outputs.dep_changes_level }}
+  dep-changes-summary:
+    description: 'Human-readable dep change summary, e.g. "3 changes (1 critical)". Empty when no data.'
+    value: ${{ steps.check.outputs.dep_changes_display }}
 
 runs:
   using: 'composite'
@@ -68,11 +74,20 @@ runs:
           REASON=$(echo "$RESPONSE" | jq -r '.reason')
           SERVICE=$(echo "$RESPONSE" | jq -r '.service')
           CHECKED_AT=$(echo "$RESPONSE" | jq -r '.checked_at')
+          # Signal 5: dependency changes (null when GitHub not connected)
+          DEP_CHANGES_LEVEL=$(echo "$RESPONSE" | jq -r '.dependency_changes.level // ""')
+          DEP_CHANGES_DISPLAY=$(echo "$RESPONSE" | jq -r '.dependency_changes.display_value // ""')
+          DEP_CHANGES_REASON=$(echo "$RESPONSE" | jq -r '.dependency_changes.primary_reason // ""')
+          DEP_CHANGES_LOCKFILE=$(echo "$RESPONSE" | jq -r '.dependency_changes.lockfile_path // ""')
         else
           VERDICT=$(echo "$RESPONSE" | sed -n 's/.*"verdict"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
           REASON=$(echo "$RESPONSE" | sed -n 's/.*"reason"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
           SERVICE=$(echo "$RESPONSE" | sed -n 's/.*"service"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
           CHECKED_AT=$(echo "$RESPONSE" | sed -n 's/.*"checked_at"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          DEP_CHANGES_LEVEL=""
+          DEP_CHANGES_DISPLAY=""
+          DEP_CHANGES_REASON=""
+          DEP_CHANGES_LOCKFILE=""
         fi
 
         if [ -z "${VERDICT:-}" ]; then
@@ -86,6 +101,10 @@ runs:
           echo "reason=${REASON}"
           echo "service=${SERVICE}"
           echo "checked_at=${CHECKED_AT}"
+          echo "dep_changes_level=${DEP_CHANGES_LEVEL}"
+          echo "dep_changes_display=${DEP_CHANGES_DISPLAY}"
+          echo "dep_changes_reason=${DEP_CHANGES_REASON}"
+          echo "dep_changes_lockfile=${DEP_CHANGES_LOCKFILE}"
         } >> "$GITHUB_OUTPUT"
 
         # Annotate + echo so the Action log is immediately readable.
@@ -109,6 +128,10 @@ runs:
         REASON: ${{ steps.check.outputs.reason }}
         SERVICE: ${{ steps.check.outputs.service }}
         CHECKED_AT: ${{ steps.check.outputs.checked_at }}
+        DEP_CHANGES_LEVEL: ${{ steps.check.outputs.dep_changes_level }}
+        DEP_CHANGES_DISPLAY: ${{ steps.check.outputs.dep_changes_display }}
+        DEP_CHANGES_REASON: ${{ steps.check.outputs.dep_changes_reason }}
+        DEP_CHANGES_LOCKFILE: ${{ steps.check.outputs.dep_changes_lockfile }}
       with:
         github-token: ${{ inputs.github-token }}
         script: |
@@ -116,6 +139,10 @@ runs:
           const reason = process.env.REASON || '';
           const service = process.env.SERVICE || '';
           const checkedAt = process.env.CHECKED_AT || '';
+          const depLevel = process.env.DEP_CHANGES_LEVEL || '';
+          const depDisplay = process.env.DEP_CHANGES_DISPLAY || '';
+          const depReason = process.env.DEP_CHANGES_REASON || '';
+          const depLockfile = process.env.DEP_CHANGES_LOCKFILE || '';
 
           const MARKER = '<!-- strake-gate-check-comment -->';
           const banner = {
@@ -123,6 +150,23 @@ runs:
             hold: '🟡 **HOLD** — review signals before merge',
             critical: '🔴 **CRITICAL** — do not deploy',
           }[verdict] || `**${verdict.toUpperCase()}**`;
+
+          // Signal 5: dependency change section — only included when GitHub is connected
+          let depSection = '';
+          if (depLevel && depLevel !== 'unknown') {
+            const depIcon = { ok: '✅', warning: '⚠️', critical: '🚨' }[depLevel] || '🔍';
+            const depTitle = { ok: 'Clean', warning: 'Warning', critical: 'Critical' }[depLevel] || depLevel;
+            const lockfileNote = depLockfile ? ` \`${depLockfile}\`` : '';
+            depSection = [
+              '',
+              `<details>`,
+              `<summary>${depIcon} **Dependency Changes** — ${depDisplay}${lockfileNote}</summary>`,
+              '',
+              depReason ? `> ${depReason}` : '',
+              '',
+              `</details>`,
+            ].filter(Boolean).join('\n');
+          }
 
           const body = [
             MARKER,
@@ -133,9 +177,10 @@ runs:
             `- **Service:** \`${service}\``,
             `- **Reason:** ${reason}`,
             `- **Checked at:** ${checkedAt}`,
+            depSection,
             '',
             `<sub>Posted by [strake-dev/gate-check](https://strake.dev/docs) • [view service](https://strake.dev/app/gate)</sub>`,
-          ].join('\n');
+          ].filter((line) => line !== undefined).join('\n');
 
           const { owner, repo } = context.repo;
           const issue_number = context.payload.pull_request.number;
